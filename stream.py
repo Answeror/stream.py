@@ -1,4 +1,4 @@
-"""Lazily-evaluated, parallelizable pipeline.
+"""
 
 Overview
 ========
@@ -118,9 +118,6 @@ try:
 except ImportError:
     def methodcaller(methodname, *args, **kwargs):
         return lambda o: getattr(o, methodname)(*args, **kwargs)
-
-
-__version__ = '0.8'
 
 
 #_____________________________________________________________________

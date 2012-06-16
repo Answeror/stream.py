@@ -2,16 +2,8 @@
 
 import os
 import sys
+from setuptools import setup
 
-from distutils.core import setup
-
-__dir__ = os.path.realpath(os.path.dirname(__file__))
-
-sys.path.insert(0, __dir__)
-try:
-    import stream
-finally:
-    del sys.path[0]
 
 classifiers = """
 Development Status :: 3 - Alpha
@@ -34,15 +26,17 @@ The code repository is located at <http://github.com/aht/stream.py>.
 """
 
 setup(
-	name = 'stream',
-	version = stream.__version__,
-	description = stream.__doc__.split('\n')[0],
-	long_description = __doc__,
-	author = 'Anh Hai Trinh',
-	author_email = 'moc.liamg@hnirt.iah.hna:otliam'[::-1],
-	keywords='lazy iterator generator stream pipe parallellization data flow functional list processing',
-	url = 'http://github.com/aht/stream.py',
-	platforms=['any'],
-	classifiers=filter(None, classifiers.split("\n")),
-	py_modules = ['stream']
+    name='stream',
+    version='0.8.1dev',
+    description='Lazily-evaluated, parallelizable pipeline.',
+    long_description=__doc__,
+    author='Anh Hai Trinh',
+    author_email='moc.liamg@hnirt.iah.hna:otliam'[::-1],
+    keywords='lazy iterator generator stream pipe parallellization data flow functional list processing',
+    url='http://github.com/aht/stream.py',
+    platforms=['any'],
+    classifiers=filter(None, classifiers.split("\n")),
+    py_modules=['stream'],
+    use_2to3=True,
+    install_requires=['distribute']
 )
