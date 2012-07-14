@@ -638,7 +638,51 @@ class tee(Stream):
 
 
 class fanout(Stream):
-    pass
+    """Fanout.
+
+    >>> import stream as st
+    >>> lhs = st.map(lambda x: x + 1)
+    >>> rhs = st.map(lambda x: x + 2)
+    >>> [(1, 2), (3, 4)] >> st.fanout(lhs, rhs) >> st.fanin >> list
+    [(2, 4), (4, 6)]
+    """
+    def __init__(self, *channels):
+        super(fanout, self).__init__()
+        self.channels = channels
+
+    def __call__(self, iterator):
+        return (i >> c for i, c in zip(iunzip(iterator), self.channels))
+
+
+class faniner(Stream):
+    """Fanin.
+
+    >>> import stream as st
+    >>> ([1, 2], [3, 4]) >> st.fanin >> list
+    [(1, 3), (2, 4)]
+    """
+
+    @staticmethod
+    def __call__(iterators):
+        return iter(zip(*iterators))
+
+    def __repr__(self):
+        return '<faniner at %s>' % hex(id(self))
+
+
+fanin = faniner()
+
+
+def iunzip(iterable):
+    """Iunzip is the same as zip(*iter) but returns iterators, instead of
+    expand the iterator. Mostly used for large sequence
+
+    See <https://gist.github.com/1063340>.
+    """
+    from operator import itemgetter
+    _tmp, iterable = itertools.tee(iterable, 2)
+    iters = itertools.tee(iterable, len(_tmp.next()))
+    return (itermap(itemgetter(i), it) for i, it in enumerate(iters))
 
 
 #_____________________________________________________________________
