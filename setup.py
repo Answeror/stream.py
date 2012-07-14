@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
-import os
-import sys
-from setuptools import setup
+#import os
+#import sys
+from setuptools import setup, find_packages
 
 
 classifiers = """
@@ -36,7 +36,9 @@ setup(
     url='http://github.com/aht/stream.py',
     platforms=['any'],
     classifiers=filter(None, classifiers.split("\n")),
-    py_modules=['stream'],
+    #py_modules=['stream'],
+    packages=find_packages(exclude=['ez_setup']),
     use_2to3=True,
-    install_requires=['distribute']
+    install_requires=['distribute'],
+    test_suite='nose.collector'
 )

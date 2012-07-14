@@ -73,28 +73,32 @@ Articles written about this module by the author can be retrieved from
 from __future__ import with_statement
 
 import __builtin__
-import copy
+#import copy
 import collections
 import heapq
 import itertools
-import operator
+#import operator
 import Queue
-import re
+#import re
 import select
 import sys
 import threading
 import time
 import functools
 
-from operator import itemgetter, attrgetter
+#from operator import itemgetter, attrgetter
 
 # python3 compliant
 try:
     # python2
     zip = itertools.izip
+    itermap = itertools.imap
+    iterfilter = itertools.ifilter
 except AttributeError:
     # python3
     zip = __builtin__.zip
+    itermap = __builtin__.map
+    iterfilter = __builtin__.filter
 
 try:
     import multiprocessing
@@ -416,8 +420,9 @@ class map(Stream):
     """Invoke a function using each element of the input stream as its only
     argument, a la itertools.imap.
 
+    >>> import stream
     >>> square = lambda x: x*x
-    >>> range(10) >> map(square) >> list
+    >>> range(10) >> stream.map(square) >> list
     [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
     """
     def __init__(self, function):
@@ -428,15 +433,16 @@ class map(Stream):
         self.function = function
 
     def __call__(self, iterator):
-        return itertools.imap(self.function, iterator)
+        return itermap(self.function, iterator)
 
 
 class filter(Stream):
     """Filter the input stream, selecting only values which evaluates to True
-    by the given function, a la itertools.ifilter.
+    by the given function, a la iterfilter.
 
+    >>> import stream
     >>> even = lambda x: x%2 == 0
-    >>> range(10) >> filter(even) >> list
+    >>> range(10) >> stream.filter(even) >> list
     [0, 2, 4, 6, 8]
     """
     def __init__(self, function):
@@ -447,7 +453,7 @@ class filter(Stream):
         self.function = function
 
     def __call__(self, iterator):
-        return itertools.ifilter(self.function, iterator)
+        return iterfilter(self.function, iterator)
 
 
 class takewhile(Stream):
@@ -490,7 +496,9 @@ class fold(Stream):
 
     This example calculate partial sums of the series 1 + 1/2 + 1/4 +...
 
-    >>> gseq(0.5) >> fold(operator.add) >> item[:5]
+    >>> import stream
+    >>> import operator
+    >>> stream.gseq(0.5) >> stream.fold(operator.add) >> stream.item[:5]
     [1, 1.5, 1.75, 1.875, 1.9375]
     """
     def __init__(self, function, initval=None):
@@ -607,11 +615,12 @@ class prepend(Stream):
 class tee(Stream):
     """Make a T-split of the input stream.
 
-    >>> foo = filter(lambda x: x%3==0)
-    >>> bar = seq(0, 2) >> tee(foo)
-    >>> bar >> item[:5]
+    >>> import stream
+    >>> foo = stream.filter(lambda x: x%3==0)
+    >>> bar = stream.seq(0, 2) >> stream.tee(foo)
+    >>> bar >> stream.item[:5]
     [0, 2, 4, 6, 8]
-    >>> foo >> item[:5]
+    >>> foo >> stream.item[:5]
     [0, 6, 12, 18, 24]
     """
     def __init__(self, named_stream):
@@ -626,6 +635,10 @@ class tee(Stream):
         self.iterator = branch1
         Stream.pipe(branch2, self.named_stream)
         return self
+
+
+class fanout(Stream):
+    pass
 
 
 #_____________________________________________________________________
