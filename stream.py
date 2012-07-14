@@ -84,6 +84,7 @@ import select
 import sys
 import threading
 import time
+import functools
 
 from operator import itemgetter, attrgetter
 
@@ -1284,9 +1285,9 @@ def reduce(function, initval=None):
     15
     """
     if initval is None:
-        return lambda s: __builtin__.reduce(function, s)
+        return lambda s: functools.reduce(function, s)
     else:
-        return lambda s: __builtin__.reduce(function, s, initval)
+        return lambda s: functools.reduce(function, s, initval)
 
 
 #_____________________________________________________________________
