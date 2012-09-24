@@ -612,6 +612,16 @@ class prepend(Stream):
         return itertools.chain(self.iterator, iterator)
 
 
+class append(Stream):
+    """Inject values at the end of the input stream.
+
+    >>> [1, 2, 3] >> append(xrange(0, 10, 2)) >> list
+    [1, 2, 3, 0, 2, 4, 6, 8]
+    """
+    def __call__(self, iterator):
+        return itertools.chain(iterator, self.iterator)
+
+
 class tee(Stream):
     """Make a T-split of the input stream.
 
@@ -726,539 +736,539 @@ def _iterrecv(pipe):
                 yield item
 
 
-#_____________________________________________________________________
-# Threaded/forked feeder
-
-
-class ThreadedFeeder(Iterable):
-    def __init__(self, generator, *args, **kwargs):
-        """Create a feeder that start the given generator with
-        *args and **kwargs in a separate thread.  The feeder will
-        act as an eagerly evaluating proxy of the generator.
-
-        The feeder can then be iter()'ed over by other threads.
-
-        This should improve performance when the generator often
-        blocks in system calls.
-        """
-        self.outqueue = Queue.Queue()
-
-        def feeder():
-            i = generator(*args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(i))
-                except StopIteration:
-                    self.outqueue.put(StopIteration)
-                    break
-        self.thread = threading.Thread(target=feeder)
-        self.thread.start()
-
-    def __iter__(self):
-        return _iterqueue(self.outqueue)
-
-    def join(self):
-        self.thread.join()
-
-    def __repr__(self):
-        return '<ThreadedFeeder at %s>' % hex(id(self))
-
-
-class ForkedFeeder(Iterable):
-    def __init__(self, generator, *args, **kwargs):
-        """Create a feeder that start the given generator with
-        *args and **kwargs in a child process. The feeder will
-        act as an eagerly evaluating proxy of the generator.
-
-        The feeder can then be iter()'ed over by other processes.
-
-        This should improve performance when the generator often
-        blocks in system calls.  Note that serialization could
-        be costly.
-        """
-        self.outpipe, inpipe = multiprocessing.Pipe(duplex=False)
-
-        def feed():
-            i = generator(*args, **kwargs)
-            while 1:
-                try:
-                    inpipe.send(next(i))
-                except StopIteration:
-                    inpipe.send(StopIteration)
-                    break
-        self.process = multiprocessing.Process(target=feed)
-        self.process.start()
-
-    def __iter__(self):
-        return _iterrecv(self.outpipe)
-
-    def join(self):
-        self.process.join()
-
-    def __repr__(self):
-        return '<ForkedFeeder at %s>' % hex(id(self))
-
-
-#_____________________________________________________________________
-# Asynchronous stream processing using a pool of threads or processes
-
-
-class ThreadPool(Stream):
-    """Work on the input stream asynchronously using a pool of threads.
-
-    >>> range(10) >> ThreadPool(map(lambda x: x*x)) >> sum
-    285
-
-    The pool object is an iterable over the output values.  If an
-    input value causes an Exception to be raised, the tuple (value,
-    exception) is put into the pool's `failqueue`.  The attribute
-    `failure` is a thead-safe iterator over the `failqueue`.
-
-    See also: Executor
-    """
-    def __init__(self, function, poolsize=_nCPU, args=[], kwargs={}):
-        """function: an iterator-processing function, one that takes an
-        iterator and return an iterator
-        """
-        super(ThreadPool, self).__init__()
-        self.function = function
-        self.inqueue = Queue.Queue()
-        self.outqueue = Queue.Queue()
-        self.failqueue = Queue.Queue()
-        self.failure = Stream(_iterqueue(self.failqueue))
-        self.closed = False
-
-        def work():
-            input, dupinput = itertools.tee(_iterqueue(self.inqueue))
-            output = self.function(input, *args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(output))
-                    next(dupinput)
-                except StopIteration:
-                    break
-                except Exception, e:
-                    self.failqueue.put((next(dupinput), e))
-        self.worker_threads = []
-        for _ in range(poolsize):
-            t = threading.Thread(target=work)
-            self.worker_threads.append(t)
-            t.start()
-
-        def cleanup():
-            # Wait for all workers to finish,
-            # then signal the end of outqueue and failqueue.
-            for t in self.worker_threads:
-                t.join()
-            self.outqueue.put(StopIteration)
-            self.failqueue.put(StopIteration)
-            self.closed = True
-        self.cleaner_thread = threading.Thread(target=cleanup)
-        self.cleaner_thread.start()
-        self.iterator = _iterqueue(self.outqueue)
-
-    def __call__(self, inpipe):
-        if self.closed:
-            raise BrokenPipe('All workers are dead, refusing to summit jobs. '
-                             'Use another Pool.')
-
-        def feed():
-            for item in inpipe:
-                self.inqueue.put(item)
-            self.inqueue.put(StopIteration)
-        self.feeder_thread = threading.Thread(target=feed)
-        self.feeder_thread.start()
-        return self.iterator
-
-    def join(self):
-        self.cleaner_thread.join()
-
-    def __repr__(self):
-        return '<ThreadPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
-
-
-class ProcessPool(Stream):
-    """Work on the input stream asynchronously using a pool of processes.
-
-    >>> range(10) >> ProcessPool(map(lambda x: x*x)) >> sum
-    285
-
-    The pool object is an iterable over the output values.  If an
-    input value causes an Exception to be raised, the tuple (value,
-    exception) is put into the pool's `failqueue`.  The attribute
-    `failure` is a thead-safe iterator over the `failqueue`.
-
-    See also: Executor
-    """
-    def __init__(self, function, poolsize=_nCPU, args=[], kwargs={}):
-        """function: an iterator-processing function, one that takes an
-        iterator and return an iterator
-        """
-        super(ProcessPool, self).__init__()
-        self.function = function
-        self.poolsize = poolsize
-        self.inqueue = multiprocessing.queues.SimpleQueue()
-        self.outqueue = multiprocessing.queues.SimpleQueue()
-        self.failqueue = multiprocessing.queues.SimpleQueue()
-        self.failure = Stream(_iterqueue(self.failqueue))
-        self.closed = False
-
-        def work():
-            input, dupinput = itertools.tee(_iterqueue(self.inqueue))
-            output = self.function(input, *args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(output))
-                    next(dupinput)
-                except StopIteration:
-                    break
-                except Exception, e:
-                    self.failqueue.put((next(dupinput), e))
-        self.worker_processes = []
-        for _ in range(self.poolsize):
-            p = multiprocessing.Process(target=work)
-            self.worker_processes.append(p)
-            p.start()
-
-        def cleanup():
-            # Wait for all workers to finish,
-            # then signal the end of outqueue and failqueue.
-            for p in self.worker_processes:
-                p.join()
-            self.outqueue.put(StopIteration)
-            self.failqueue.put(StopIteration)
-            self.closed = True
-        self.cleaner_thread = threading.Thread(target=cleanup)
-        self.cleaner_thread.start()
-        self.iterator = _iterqueue(self.outqueue)
-
-    def __call__(self, inpipe):
-        if self.closed:
-            raise BrokenPipe('All workers are dead, refusing to summit jobs. '
-                             'Use another Pool.')
-
-        def feed():
-            for item in inpipe:
-                self.inqueue.put(item)
-            self.inqueue.put(StopIteration)
-        self.feeder_thread = threading.Thread(target=feed)
-        self.feeder_thread.start()
-        return self.iterator
-
-    def join(self):
-        self.cleaner_thread.join()
-
-    def __repr__(self):
-        return '<ProcessPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
-
-
-class Executor(object):
-    """Provide a fine-grained level of control over a ThreadPool or ProcessPool.
-
-    The constructor takes a pool class and arguments to its constructor::
-
-      >>> executor = Executor(ThreadPool, map(lambda x: x*x))
-
-    Job ids are returned when items are submitted::
-
-      >>> executor.submit(*range(10))
-      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-      >>> executor.submit('foo')
-      10
-
-    A call to close() ends jobs submission.  Workers threads/processes
-    are now allowed to terminate after all jobs are completed::
-
-      >>> executor.close()
-
-    The `result` and `failure` attributes are Stream instances and
-    thus iterable.  The returned iterators behave as follow: their
-    next() calls will block until a next output is available, or
-    raise StopIteration if there is no more output.  Thus we could use
-    the attributes `result` and `failure` like any other iterables::
-
-      >>> set(executor.result) == set([0, 1, 4, 9, 16, 25, 36, 49, 64, 81])
-      True
-      >>> list(executor.failure)
-      [('foo', TypeError("can't multiply sequence by non-int of type 'str'",))]
-    """
-    def __init__(self, poolclass, function, poolsize=_nCPU, args=[], kwargs={}):
-        def process_job_id(input):
-            input, dupinput = itertools.tee(input)
-            id = iter(dupinput >> cut[0])
-            input = iter(input >> cut[1])
-            output = function(input, *args, **kwargs)
-            for item in output:
-                yield next(id), item
-        self.pool = poolclass(process_job_id,
-                              poolsize=poolsize,
-                              args=args,
-                              kwargs=kwargs)
-        self.jobcount = 0
-        self._status = []
-        self.waitqueue = Queue.Queue()
-        if poolclass is ProcessPool:
-            self.resultqueue = multiprocessing.queues.SimpleQueue()
-            self.failqueue = multiprocessing.queues.SimpleQueue()
-        else:
-            self.resultqueue = Queue.Queue()
-            self.failqueue = Queue.Queue()
-        self.result = Stream(_iterqueue(self.resultqueue))
-        self.failure = Stream(_iterqueue(self.failqueue))
-        self.closed = False
-
-        self.lock = threading.Lock()
-        ## Acquired to submit and update job statuses.
-
-        self.sema = threading.BoundedSemaphore(poolsize)
-        ## Used to throttle transfer from waitqueue to pool.inqueue,
-        ## acquired by input_feeder, released by trackers.
-
-        def feed_input():
-            for id, item in _iterqueue(self.waitqueue):
-                self.sema.acquire()
-                with self.lock:
-                    if self._status[id] == 'SUBMITTED':
-                        self.pool.inqueue.put((id, item))
-                        self._status[id] = 'RUNNING'
-                    else:
-                        self.sema.release()
-            self.pool.inqueue.put(StopIteration)
-        self.inputfeeder_thread = threading.Thread(target=feed_input)
-        self.inputfeeder_thread.start()
-
-        def track_result():
-            for id, item in self.pool:
-                self.sema.release()
-                with self.lock:
-                    self._status[id] = 'COMPLETED'
-                self.resultqueue.put(item)
-            self.resultqueue.put(StopIteration)
-        self.resulttracker_thread = threading.Thread(target=track_result)
-        self.resulttracker_thread.start()
-
-        def track_failure():
-            for outval, exception in self.pool.failure:
-                self.sema.release()
-                id, item = outval
-                with self.lock:
-                    self._status[id] = 'FAILED'
-                self.failqueue.put((item, exception))
-            self.failqueue.put(StopIteration)
-        self.failuretracker_thread = threading.Thread(target=track_failure)
-        self.failuretracker_thread.start()
-
-    def submit(self, *items):
-        """Return job ids assigned to the submitted items."""
-        with self.lock:
-            if self.closed:
-                raise BrokenPipe('Job submission has been closed.')
-            id = self.jobcount
-            self._status += ['SUBMITTED'] * len(items)
-            self.jobcount += len(items)
-            for item in items:
-                self.waitqueue.put((id, item))
-                id += 1
-        if len(items) == 1:
-            return id - 1
-        else:
-            return range(id - len(items), id)
-
-    def cancel(self, *ids):
-        """Try to cancel jobs with associated ids.
-
-        Return the actual number of jobs cancelled.
-        """
-        ncancelled = 0
-        with self.lock:
-            for id in ids:
-                try:
-                    if self._status[id] == 'SUBMITTED':
-                        self._status[id] = 'CANCELLED'
-                        ncancelled += 1
-                except IndexError:
-                    pass
-        return ncancelled
-
-    def status(self, *ids):
-        """Return the statuses of jobs with associated ids at the
-        time of call:  either 'SUBMITED', 'CANCELLED', 'RUNNING',
-        'COMPLETED' or 'FAILED'.
-        """
-        with self.lock:
-            if len(ids) > 1:
-                return [self._status[i] for i in ids]
-            else:
-                return self._status[ids[0]]
-
-    def close(self):
-        """Signal that the executor will no longer accept job submission.
-
-        Worker threads/processes are now allowed to terminate after all
-        jobs have been are completed.  Without a call to close(), they will
-        stay around forever waiting for more jobs to come.
-        """
-        with self.lock:
-            if self.closed:
-                return
-            self.waitqueue.put(StopIteration)
-            self.closed = True
-
-    def join(self):
-        """Note that the Executor must be close()'d elsewhere,
-        or join() will never return.
-        """
-        self.inputfeeder_thread.join()
-        self.pool.join()
-        self.resulttracker_thread.join()
-        self.failuretracker_thread.join()
-
-    def shutdown(self):
-        """Shut down the Executor.  Suspend all waiting jobs.
-
-        Running workers will terminate after finishing their current job items.
-        The call will block until all workers are terminated.
-        """
-        with self.lock:
-            self.pool.inqueue.put(StopIteration)   # Stop the pool workers
-            self.waitqueue.put(StopIteration)      # Stop the input_feeder
-            _iterqueue(self.waitqueue) >> item[-1]  # Exhaust the waitqueue
-            self.closed = True
-        self.join()
-
-    def __repr__(self):
-        return '<Executor(%s, poolsize=%s) at %s>' % (self.pool.__class__.__name__,
-                                                      self.pool.poolsize,
-                                                      hex(id(self)))
-
-
-#_____________________________________________________________________
-# Collectors and Sorters
-
-
-class PCollector(Stream):
-    """Collect items from many ForkedFeeder's or ProcessPool's.
-    """
-    def __init__(self):
-        self.inpipes = []
-
-        def selrecv():
-            while self.inpipes:
-                ready, _, _ = select.select(self.inpipes, [], [])
-                for inpipe in ready:
-                    item = inpipe.recv()
-                    if item is StopIteration:
-                        del self.inpipes[self.inpipes.index(inpipe)]
-                    else:
-                        yield item
-        self.iterator = selrecv()
-
-    def __pipe__(self, inpipe):
-        self.inpipes.append(inpipe.outpipe)
-
-    def __repr__(self):
-        return '<PCollector at %s>' % hex(id(self))
-
-
-class _PCollector(Stream):
-    """Collect items from many ForkedFeeder's or ProcessPool's.
-
-    All input pipes are polled individually.  When none is ready, the
-    collector sleeps for a fix duration before polling again.
-    """
-    def __init__(self, waittime=0.1):
-        """waitime: the duration that the collector sleeps for
-        when all input pipes are empty
-        """
-        self.inpipes = []
-        self.waittime = waittime
-
-        def pollrecv():
-            while self.inpipes:
-                ready = [p for p in self.inpipes if p.poll()]
-                for inpipe in ready:
-                    item = inpipe.recv()
-                    if item is StopIteration:
-                        del self.inpipes[self.inpipes.index(inpipe)]
-                    else:
-                        yield item
-        self.iterator = pollrecv()
-
-    def __pipe__(self, inpipe):
-        self.inpipes.append(inpipe.outpipe)
-
-    def __repr__(self):
-        return '<QCollector at %s>' % hex(id(self))
-
-if sys.platform == "win32":
-    PCollector = _PCollector
-
-
-class QCollector(Stream):
-    """Collect items from many ThreadedFeeder's or ThreadPool's.
-
-    All input queues are polled individually.  When none is ready, the
-    collector sleeps for a fix duration before polling again.
-    """
-    def __init__(self, waittime=0.1):
-        """waitime: the duration that the collector sleeps for
-        when all input pipes are empty
-        """
-        self.inqueues = []
-        self.waittime = waittime
-
-        def nonemptyget():
-            while self.inqueues:
-                ready = [q for q in self.inqueues if not q.empty()]
-                if not ready:
-                    time.sleep(self.waittime)
-                for q in ready:
-                    item = q.get()
-                    if item is StopIteration:
-                        del self.inqueues[self.inqueues.index(q)]
-                    else:
-                        yield item
-        self.iterator = nonemptyget()
-
-    def __pipe__(self, inpipe):
-        self.inqueues.append(inpipe.outqueue)
-
-    def __repr__(self):
-        return '<QCollector at %s>' % hex(id(self))
-
-
-class PSorter(Stream):
-    """Merge sorted input (smallest to largest) coming from many
-    ForkedFeeder's or ProcessPool's.
-    """
-    def __init__(self):
-        self.inpipes = []
-
-    def __iter__(self):
-        return heapq.merge(*__builtin__.map(_iterrecv, self.inpipes))
-
-    def __pipe__(self, inpipe):
-        self.inpipes.append(inpipe.outpipe)
-
-    def __repr__(self):
-        return '<PSorter at %s>' % hex(id(self))
-
-
-class QSorter(Stream):
-    """Merge sorted input (smallest to largest) coming from many
-    ThreadFeeder's or ThreadPool's.
-    """
-    def __init__(self):
-        self.inqueues = []
-
-    def __iter__(self):
-        return heapq.merge(*__builtin__.map(_iterqueue, self.inqueues))
-
-    def __pipe__(self, inpipe):
-        self.inqueues.append(inpipe.outqueue)
-
-    def __repr__(self):
-        return '<PSorter at %s>' % hex(id(self))
+##_____________________________________________________________________
+## Threaded/forked feeder
+
+
+#class ThreadedFeeder(Iterable):
+    #def __init__(self, generator, *args, **kwargs):
+        #"""Create a feeder that start the given generator with
+        #*args and **kwargs in a separate thread.  The feeder will
+        #act as an eagerly evaluating proxy of the generator.
+
+        #The feeder can then be iter()'ed over by other threads.
+
+        #This should improve performance when the generator often
+        #blocks in system calls.
+        #"""
+        #self.outqueue = Queue.Queue()
+
+        #def feeder():
+            #i = generator(*args, **kwargs)
+            #while 1:
+                #try:
+                    #self.outqueue.put(next(i))
+                #except StopIteration:
+                    #self.outqueue.put(StopIteration)
+                    #break
+        #self.thread = threading.Thread(target=feeder)
+        #self.thread.start()
+
+    #def __iter__(self):
+        #return _iterqueue(self.outqueue)
+
+    #def join(self):
+        #self.thread.join()
+
+    #def __repr__(self):
+        #return '<ThreadedFeeder at %s>' % hex(id(self))
+
+
+#class ForkedFeeder(Iterable):
+    #def __init__(self, generator, *args, **kwargs):
+        #"""Create a feeder that start the given generator with
+        #*args and **kwargs in a child process. The feeder will
+        #act as an eagerly evaluating proxy of the generator.
+
+        #The feeder can then be iter()'ed over by other processes.
+
+        #This should improve performance when the generator often
+        #blocks in system calls.  Note that serialization could
+        #be costly.
+        #"""
+        #self.outpipe, inpipe = multiprocessing.Pipe(duplex=False)
+
+        #def feed():
+            #i = generator(*args, **kwargs)
+            #while 1:
+                #try:
+                    #inpipe.send(next(i))
+                #except StopIteration:
+                    #inpipe.send(StopIteration)
+                    #break
+        #self.process = multiprocessing.Process(target=feed)
+        #self.process.start()
+
+    #def __iter__(self):
+        #return _iterrecv(self.outpipe)
+
+    #def join(self):
+        #self.process.join()
+
+    #def __repr__(self):
+        #return '<ForkedFeeder at %s>' % hex(id(self))
+
+
+##_____________________________________________________________________
+## Asynchronous stream processing using a pool of threads or processes
+
+
+#class ThreadPool(Stream):
+    #"""Work on the input stream asynchronously using a pool of threads.
+
+    #>>> range(10) >> ThreadPool(map(lambda x: x*x)) >> sum
+    #285
+
+    #The pool object is an iterable over the output values.  If an
+    #input value causes an Exception to be raised, the tuple (value,
+    #exception) is put into the pool's `failqueue`.  The attribute
+    #`failure` is a thead-safe iterator over the `failqueue`.
+
+    #See also: Executor
+    #"""
+    #def __init__(self, function, poolsize=_nCPU, args=[], kwargs={}):
+        #"""function: an iterator-processing function, one that takes an
+        #iterator and return an iterator
+        #"""
+        #super(ThreadPool, self).__init__()
+        #self.function = function
+        #self.inqueue = Queue.Queue()
+        #self.outqueue = Queue.Queue()
+        #self.failqueue = Queue.Queue()
+        #self.failure = Stream(_iterqueue(self.failqueue))
+        #self.closed = False
+
+        #def work():
+            #input, dupinput = itertools.tee(_iterqueue(self.inqueue))
+            #output = self.function(input, *args, **kwargs)
+            #while 1:
+                #try:
+                    #self.outqueue.put(next(output))
+                    #next(dupinput)
+                #except StopIteration:
+                    #break
+                #except Exception, e:
+                    #self.failqueue.put((next(dupinput), e))
+        #self.worker_threads = []
+        #for _ in range(poolsize):
+            #t = threading.Thread(target=work)
+            #self.worker_threads.append(t)
+            #t.start()
+
+        #def cleanup():
+            ## Wait for all workers to finish,
+            ## then signal the end of outqueue and failqueue.
+            #for t in self.worker_threads:
+                #t.join()
+            #self.outqueue.put(StopIteration)
+            #self.failqueue.put(StopIteration)
+            #self.closed = True
+        #self.cleaner_thread = threading.Thread(target=cleanup)
+        #self.cleaner_thread.start()
+        #self.iterator = _iterqueue(self.outqueue)
+
+    #def __call__(self, inpipe):
+        #if self.closed:
+            #raise BrokenPipe('All workers are dead, refusing to summit jobs. '
+                             #'Use another Pool.')
+
+        #def feed():
+            #for item in inpipe:
+                #self.inqueue.put(item)
+            #self.inqueue.put(StopIteration)
+        #self.feeder_thread = threading.Thread(target=feed)
+        #self.feeder_thread.start()
+        #return self.iterator
+
+    #def join(self):
+        #self.cleaner_thread.join()
+
+    #def __repr__(self):
+        #return '<ThreadPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
+
+
+#class ProcessPool(Stream):
+    #"""Work on the input stream asynchronously using a pool of processes.
+
+    #>>> range(10) >> ProcessPool(map(lambda x: x*x)) >> sum
+    #285
+
+    #The pool object is an iterable over the output values.  If an
+    #input value causes an Exception to be raised, the tuple (value,
+    #exception) is put into the pool's `failqueue`.  The attribute
+    #`failure` is a thead-safe iterator over the `failqueue`.
+
+    #See also: Executor
+    #"""
+    #def __init__(self, function, poolsize=_nCPU, args=[], kwargs={}):
+        #"""function: an iterator-processing function, one that takes an
+        #iterator and return an iterator
+        #"""
+        #super(ProcessPool, self).__init__()
+        #self.function = function
+        #self.poolsize = poolsize
+        #self.inqueue = multiprocessing.queues.SimpleQueue()
+        #self.outqueue = multiprocessing.queues.SimpleQueue()
+        #self.failqueue = multiprocessing.queues.SimpleQueue()
+        #self.failure = Stream(_iterqueue(self.failqueue))
+        #self.closed = False
+
+        #def work():
+            #input, dupinput = itertools.tee(_iterqueue(self.inqueue))
+            #output = self.function(input, *args, **kwargs)
+            #while 1:
+                #try:
+                    #self.outqueue.put(next(output))
+                    #next(dupinput)
+                #except StopIteration:
+                    #break
+                #except Exception, e:
+                    #self.failqueue.put((next(dupinput), e))
+        #self.worker_processes = []
+        #for _ in range(self.poolsize):
+            #p = multiprocessing.Process(target=work)
+            #self.worker_processes.append(p)
+            #p.start()
+
+        #def cleanup():
+            ## Wait for all workers to finish,
+            ## then signal the end of outqueue and failqueue.
+            #for p in self.worker_processes:
+                #p.join()
+            #self.outqueue.put(StopIteration)
+            #self.failqueue.put(StopIteration)
+            #self.closed = True
+        #self.cleaner_thread = threading.Thread(target=cleanup)
+        #self.cleaner_thread.start()
+        #self.iterator = _iterqueue(self.outqueue)
+
+    #def __call__(self, inpipe):
+        #if self.closed:
+            #raise BrokenPipe('All workers are dead, refusing to summit jobs. '
+                             #'Use another Pool.')
+
+        #def feed():
+            #for item in inpipe:
+                #self.inqueue.put(item)
+            #self.inqueue.put(StopIteration)
+        #self.feeder_thread = threading.Thread(target=feed)
+        #self.feeder_thread.start()
+        #return self.iterator
+
+    #def join(self):
+        #self.cleaner_thread.join()
+
+    #def __repr__(self):
+        #return '<ProcessPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
+
+
+#class Executor(object):
+    #"""Provide a fine-grained level of control over a ThreadPool or ProcessPool.
+
+    #The constructor takes a pool class and arguments to its constructor::
+
+      #>>> executor = Executor(ThreadPool, map(lambda x: x*x))
+
+    #Job ids are returned when items are submitted::
+
+      #>>> executor.submit(*range(10))
+      #[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+      #>>> executor.submit('foo')
+      #10
+
+    #A call to close() ends jobs submission.  Workers threads/processes
+    #are now allowed to terminate after all jobs are completed::
+
+      #>>> executor.close()
+
+    #The `result` and `failure` attributes are Stream instances and
+    #thus iterable.  The returned iterators behave as follow: their
+    #next() calls will block until a next output is available, or
+    #raise StopIteration if there is no more output.  Thus we could use
+    #the attributes `result` and `failure` like any other iterables::
+
+      #>>> set(executor.result) == set([0, 1, 4, 9, 16, 25, 36, 49, 64, 81])
+      #True
+      #>>> list(executor.failure)
+      #[('foo', TypeError("can't multiply sequence by non-int of type 'str'",))]
+    #"""
+    #def __init__(self, poolclass, function, poolsize=_nCPU, args=[], kwargs={}):
+        #def process_job_id(input):
+            #input, dupinput = itertools.tee(input)
+            #id = iter(dupinput >> cut[0])
+            #input = iter(input >> cut[1])
+            #output = function(input, *args, **kwargs)
+            #for item in output:
+                #yield next(id), item
+        #self.pool = poolclass(process_job_id,
+                              #poolsize=poolsize,
+                              #args=args,
+                              #kwargs=kwargs)
+        #self.jobcount = 0
+        #self._status = []
+        #self.waitqueue = Queue.Queue()
+        #if poolclass is ProcessPool:
+            #self.resultqueue = multiprocessing.queues.SimpleQueue()
+            #self.failqueue = multiprocessing.queues.SimpleQueue()
+        #else:
+            #self.resultqueue = Queue.Queue()
+            #self.failqueue = Queue.Queue()
+        #self.result = Stream(_iterqueue(self.resultqueue))
+        #self.failure = Stream(_iterqueue(self.failqueue))
+        #self.closed = False
+
+        #self.lock = threading.Lock()
+        ### Acquired to submit and update job statuses.
+
+        #self.sema = threading.BoundedSemaphore(poolsize)
+        ### Used to throttle transfer from waitqueue to pool.inqueue,
+        ### acquired by input_feeder, released by trackers.
+
+        #def feed_input():
+            #for id, item in _iterqueue(self.waitqueue):
+                #self.sema.acquire()
+                #with self.lock:
+                    #if self._status[id] == 'SUBMITTED':
+                        #self.pool.inqueue.put((id, item))
+                        #self._status[id] = 'RUNNING'
+                    #else:
+                        #self.sema.release()
+            #self.pool.inqueue.put(StopIteration)
+        #self.inputfeeder_thread = threading.Thread(target=feed_input)
+        #self.inputfeeder_thread.start()
+
+        #def track_result():
+            #for id, item in self.pool:
+                #self.sema.release()
+                #with self.lock:
+                    #self._status[id] = 'COMPLETED'
+                #self.resultqueue.put(item)
+            #self.resultqueue.put(StopIteration)
+        #self.resulttracker_thread = threading.Thread(target=track_result)
+        #self.resulttracker_thread.start()
+
+        #def track_failure():
+            #for outval, exception in self.pool.failure:
+                #self.sema.release()
+                #id, item = outval
+                #with self.lock:
+                    #self._status[id] = 'FAILED'
+                #self.failqueue.put((item, exception))
+            #self.failqueue.put(StopIteration)
+        #self.failuretracker_thread = threading.Thread(target=track_failure)
+        #self.failuretracker_thread.start()
+
+    #def submit(self, *items):
+        #"""Return job ids assigned to the submitted items."""
+        #with self.lock:
+            #if self.closed:
+                #raise BrokenPipe('Job submission has been closed.')
+            #id = self.jobcount
+            #self._status += ['SUBMITTED'] * len(items)
+            #self.jobcount += len(items)
+            #for item in items:
+                #self.waitqueue.put((id, item))
+                #id += 1
+        #if len(items) == 1:
+            #return id - 1
+        #else:
+            #return range(id - len(items), id)
+
+    #def cancel(self, *ids):
+        #"""Try to cancel jobs with associated ids.
+
+        #Return the actual number of jobs cancelled.
+        #"""
+        #ncancelled = 0
+        #with self.lock:
+            #for id in ids:
+                #try:
+                    #if self._status[id] == 'SUBMITTED':
+                        #self._status[id] = 'CANCELLED'
+                        #ncancelled += 1
+                #except IndexError:
+                    #pass
+        #return ncancelled
+
+    #def status(self, *ids):
+        #"""Return the statuses of jobs with associated ids at the
+        #time of call:  either 'SUBMITED', 'CANCELLED', 'RUNNING',
+        #'COMPLETED' or 'FAILED'.
+        #"""
+        #with self.lock:
+            #if len(ids) > 1:
+                #return [self._status[i] for i in ids]
+            #else:
+                #return self._status[ids[0]]
+
+    #def close(self):
+        #"""Signal that the executor will no longer accept job submission.
+
+        #Worker threads/processes are now allowed to terminate after all
+        #jobs have been are completed.  Without a call to close(), they will
+        #stay around forever waiting for more jobs to come.
+        #"""
+        #with self.lock:
+            #if self.closed:
+                #return
+            #self.waitqueue.put(StopIteration)
+            #self.closed = True
+
+    #def join(self):
+        #"""Note that the Executor must be close()'d elsewhere,
+        #or join() will never return.
+        #"""
+        #self.inputfeeder_thread.join()
+        #self.pool.join()
+        #self.resulttracker_thread.join()
+        #self.failuretracker_thread.join()
+
+    #def shutdown(self):
+        #"""Shut down the Executor.  Suspend all waiting jobs.
+
+        #Running workers will terminate after finishing their current job items.
+        #The call will block until all workers are terminated.
+        #"""
+        #with self.lock:
+            #self.pool.inqueue.put(StopIteration)   # Stop the pool workers
+            #self.waitqueue.put(StopIteration)      # Stop the input_feeder
+            #_iterqueue(self.waitqueue) >> item[-1]  # Exhaust the waitqueue
+            #self.closed = True
+        #self.join()
+
+    #def __repr__(self):
+        #return '<Executor(%s, poolsize=%s) at %s>' % (self.pool.__class__.__name__,
+                                                      #self.pool.poolsize,
+                                                      #hex(id(self)))
+
+
+##_____________________________________________________________________
+## Collectors and Sorters
+
+
+#class PCollector(Stream):
+    #"""Collect items from many ForkedFeeder's or ProcessPool's.
+    #"""
+    #def __init__(self):
+        #self.inpipes = []
+
+        #def selrecv():
+            #while self.inpipes:
+                #ready, _, _ = select.select(self.inpipes, [], [])
+                #for inpipe in ready:
+                    #item = inpipe.recv()
+                    #if item is StopIteration:
+                        #del self.inpipes[self.inpipes.index(inpipe)]
+                    #else:
+                        #yield item
+        #self.iterator = selrecv()
+
+    #def __pipe__(self, inpipe):
+        #self.inpipes.append(inpipe.outpipe)
+
+    #def __repr__(self):
+        #return '<PCollector at %s>' % hex(id(self))
+
+
+#class _PCollector(Stream):
+    #"""Collect items from many ForkedFeeder's or ProcessPool's.
+
+    #All input pipes are polled individually.  When none is ready, the
+    #collector sleeps for a fix duration before polling again.
+    #"""
+    #def __init__(self, waittime=0.1):
+        #"""waitime: the duration that the collector sleeps for
+        #when all input pipes are empty
+        #"""
+        #self.inpipes = []
+        #self.waittime = waittime
+
+        #def pollrecv():
+            #while self.inpipes:
+                #ready = [p for p in self.inpipes if p.poll()]
+                #for inpipe in ready:
+                    #item = inpipe.recv()
+                    #if item is StopIteration:
+                        #del self.inpipes[self.inpipes.index(inpipe)]
+                    #else:
+                        #yield item
+        #self.iterator = pollrecv()
+
+    #def __pipe__(self, inpipe):
+        #self.inpipes.append(inpipe.outpipe)
+
+    #def __repr__(self):
+        #return '<QCollector at %s>' % hex(id(self))
+
+#if sys.platform == "win32":
+    #PCollector = _PCollector
+
+
+#class QCollector(Stream):
+    #"""Collect items from many ThreadedFeeder's or ThreadPool's.
+
+    #All input queues are polled individually.  When none is ready, the
+    #collector sleeps for a fix duration before polling again.
+    #"""
+    #def __init__(self, waittime=0.1):
+        #"""waitime: the duration that the collector sleeps for
+        #when all input pipes are empty
+        #"""
+        #self.inqueues = []
+        #self.waittime = waittime
+
+        #def nonemptyget():
+            #while self.inqueues:
+                #ready = [q for q in self.inqueues if not q.empty()]
+                #if not ready:
+                    #time.sleep(self.waittime)
+                #for q in ready:
+                    #item = q.get()
+                    #if item is StopIteration:
+                        #del self.inqueues[self.inqueues.index(q)]
+                    #else:
+                        #yield item
+        #self.iterator = nonemptyget()
+
+    #def __pipe__(self, inpipe):
+        #self.inqueues.append(inpipe.outqueue)
+
+    #def __repr__(self):
+        #return '<QCollector at %s>' % hex(id(self))
+
+
+#class PSorter(Stream):
+    #"""Merge sorted input (smallest to largest) coming from many
+    #ForkedFeeder's or ProcessPool's.
+    #"""
+    #def __init__(self):
+        #self.inpipes = []
+
+    #def __iter__(self):
+        #return heapq.merge(*__builtin__.map(_iterrecv, self.inpipes))
+
+    #def __pipe__(self, inpipe):
+        #self.inpipes.append(inpipe.outpipe)
+
+    #def __repr__(self):
+        #return '<PSorter at %s>' % hex(id(self))
+
+
+#class QSorter(Stream):
+    #"""Merge sorted input (smallest to largest) coming from many
+    #ThreadFeeder's or ThreadPool's.
+    #"""
+    #def __init__(self):
+        #self.inqueues = []
+
+    #def __iter__(self):
+        #return heapq.merge(*__builtin__.map(_iterqueue, self.inqueues))
+
+    #def __pipe__(self, inpipe):
+        #self.inqueues.append(inpipe.outqueue)
+
+    #def __repr__(self):
+        #return '<PSorter at %s>' % hex(id(self))
 
 
 #_____________________________________________________________________
