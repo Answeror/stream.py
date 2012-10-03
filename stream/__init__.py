@@ -683,6 +683,23 @@ class faniner(Stream):
 fanin = faniner()
 
 
+class split(Stream):
+    """Fanout.
+
+    >>> import stream as st
+    >>> lhs = st.map(lambda x: x + 1)
+    >>> rhs = st.map(lambda x: x + 2)
+    >>> [(1, 2), (3, 4)] >> st.split(lhs, rhs) >> list
+    [(2, 4), (4, 6)]
+    """
+    def __init__(self, *channels):
+        super(split, self).__init__()
+        self.channels = channels
+
+    def __call__(self, iterator):
+        return iter(zip(*(iter(i >> c) for i, c in zip(list(iunzip(iterator)), self.channels))))
+
+
 def iunzip(iterable):
     """Iunzip is the same as zip(*iter) but returns iterators, instead of
     expand the iterator. Mostly used for large sequence
