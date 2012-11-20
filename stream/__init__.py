@@ -622,6 +622,21 @@ class append(Stream):
         return itertools.chain(iterator, self.iterator)
 
 
+class chainer(Stream):
+    """Chain multiple iters.
+
+    >>> [[1, 2], [3, 4]] >> chain >> list
+    [1, 2, 3, 4]
+    >>> [[[1], 2], [3, 4]] >> chain >> list
+    [[1], 2, 3, 4]
+    """
+    def __call__(self, iterator):
+        return itertools.chain(*iterator)
+
+
+chain = chainer()
+
+
 class tee(Stream):
     """Make a T-split of the input stream.
 
