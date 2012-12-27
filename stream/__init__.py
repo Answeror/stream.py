@@ -625,10 +625,13 @@ class append(Stream):
 class chainer(Stream):
     """Chain multiple iters.
 
-    >>> [[1, 2], [3, 4]] >> chain >> list
+    >>> import stream as sm
+    >>> [[1, 2], [3, 4]] >> sm.chain >> list
     [1, 2, 3, 4]
-    >>> [[[1], 2], [3, 4]] >> chain >> list
+    >>> [[[1], 2], [3, 4]] >> sm.chain >> list
     [[1], 2, 3, 4]
+    >>> [1, 2] >> sm.map(lambda x: [x] * 2) >> sm.chain >> list
+    [1, 1, 2, 2]
     """
     def __call__(self, iterator):
         return itertools.chain(*iterator)
