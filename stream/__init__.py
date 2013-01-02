@@ -218,14 +218,12 @@ class take(Stream):
         """n: the number of elements to be taken"""
         super(take, self).__init__()
         self.n = n
-        self.items = []
 
     def __call__(self, iterator):
-        self.items = list(itertools.islice(iterator, self.n))
-        return iter(self.items)
+        return itertools.islice(iterator, self.n)
 
     def __repr__(self):
-        return 'Stream(%s)' % repr(self.items)
+        return 'Stream(%s)' % list(self.iterator)
 
 
 negative = lambda x: x and x < 0    # since None < 0 == True
