@@ -27,7 +27,7 @@ The code repository is located at <http://github.com/aht/stream.py>.
 
 setup(
     name='stream',
-    version='0.8.3dev',
+    version='0.8.3',
     description='Lazily-evaluated, parallelizable pipeline.',
     long_description=__doc__,
     author='Anh Hai Trinh',
